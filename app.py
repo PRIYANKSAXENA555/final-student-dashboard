@@ -114,38 +114,7 @@ def get_student_data(student_name, all_test_data):
                 "max_phy_chem": sheet_info["max_phy_chem"]
             })
     
-    # Sort by sheet name (approximate date order)
     return student_records
-
-def extract_date_from_sheet(sheet_name):
-    """Extract date from sheet name for sorting"""
-    patterns = [
-        r'(\d{1,2})(?:ST|ND|RD|TH)?\s+(\w+)\s+(\d{2,4})',
-        r'(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})'
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, sheet_name, re.IGNORECASE)
-        if match:
-            try:
-                day = int(match.group(1))
-                month_str = match.group(2)
-                year = int(match.group(3))
-                
-                if year < 100:
-                    year = 2000 + year
-                
-                months = {
-                    'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
-                    'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
-                }
-                
-                month = months.get(month_str.upper(), 1)
-                return datetime(year, month, day)
-            except:
-                pass
-    
-    return datetime(2025, 1, 1)
 
 # ========================
 # CUSTOM CSS
@@ -191,16 +160,6 @@ st.markdown("""
         font-size: 0.8rem;
         margin-top: 0.5rem;
     }
-    .login-container {
-        max-width: 450px;
-        margin: 0 auto;
-    }
-    .test-card {
-        background: white;
-        padding: 1rem;
-        border-radius: 10px;
-        margin-bottom: 0.5rem;
-    }
     .score-good {
         color: #2e7d32;
         font-weight: bold;
@@ -222,7 +181,6 @@ st.markdown("""
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.student_name = ""
-    st.session_state.student_data = None
 
 # ========================
 # LOGIN PAGE
@@ -333,30 +291,27 @@ else:
         
         with col2:
             avg_phy = round(df['phy_percent'].mean())
-            color_class = "score-good" if avg_phy >= 70 else ("score-avg" if avg_phy >= 40 else "score-bad")
             st.markdown(f"""
                 <div class="stat-card">
-                    <div class="stat-value {color_class}">{avg_phy}%</div>
+                    <div class="stat-value">{avg_phy}%</div>
                     <div class="stat-label">Avg Physics</div>
                 </div>
             """, unsafe_allow_html=True)
         
         with col3:
             avg_chem = round(df['chem_percent'].mean())
-            color_class = "score-good" if avg_chem >= 70 else ("score-avg" if avg_chem >= 40 else "score-bad")
             st.markdown(f"""
                 <div class="stat-card">
-                    <div class="stat-value {color_class}">{avg_chem}%</div>
+                    <div class="stat-value">{avg_chem}%</div>
                     <div class="stat-label">Avg Chemistry</div>
                 </div>
             """, unsafe_allow_html=True)
         
         with col4:
             avg_maths = round(df['maths_percent'].mean())
-            color_class = "score-good" if avg_maths >= 70 else ("score-avg" if avg_maths >= 40 else "score-bad")
             st.markdown(f"""
                 <div class="stat-card">
-                    <div class="stat-value {color_class}">{avg_maths}%</div>
+                    <div class="stat-value">{avg_maths}%</div>
                     <div class="stat-label">Avg Maths</div>
                 </div>
             """, unsafe_allow_html=True)
@@ -373,10 +328,9 @@ else:
         
         with col6:
             avg_total = round(df['total_percent'].mean())
-            color_class = "score-good" if avg_total >= 70 else ("score-avg" if avg_total >= 40 else "score-bad")
             st.markdown(f"""
                 <div class="stat-card">
-                    <div class="stat-value {color_class}">{avg_total}%</div>
+                    <div class="stat-value">{avg_total}%</div>
                     <div class="stat-label">Avg Total</div>
                 </div>
             """, unsafe_allow_html=True)
@@ -411,20 +365,10 @@ else:
         display_df = df[['test_name', 'phy', 'chem', 'maths', 'total', 'rank']].copy()
         display_df.columns = ['Test Name', 'Physics', 'Chemistry', 'Maths', 'Total', 'Rank']
         
-        # Add max marks info and color coding
-        def format_score(score, max_val):
-            percent = (score / max_val) * 100
-            if percent >= 70:
-                return f"🟢 {score}/{max_val}"
-            elif percent >= 40:
-                return f"🟡 {score}/{max_val}"
-            else:
-                return f"🔴 {score}/{max_val}"
-        
-        display_df['Physics'] = df.apply(lambda x: format_score(x['phy'], x['max_phy_chem']), axis=1)
-        display_df['Chemistry'] = df.apply(lambda x: format_score(x['chem'], x['max_phy_chem']), axis=1)
-        display_df['Maths'] = df.apply(lambda x: f"{x['maths']}/100", axis=1)
-        display_df['Maths'] = df.apply(lambda x: format_score(x['maths'], 100), axis=1)
+        # Add max marks info
+        display_df['Physics'] = df.apply(lambda x: f"{int(x['phy'])}/{x['max_phy_chem']}", axis=1)
+        display_df['Chemistry'] = df.apply(lambda x: f"{int(x['chem'])}/{x['max_phy_chem']}", axis=1)
+        display_df['Maths'] = df['maths'].astype(int).astype(str) + "/100"
         
         st.dataframe(
             display_df,
@@ -444,34 +388,20 @@ else:
         st.markdown("---")
         st.subheader("💡 Performance Insights")
         
-        # Find best subject
-        subject_avgs = {
-            "Physics": avg_phy,
-            "Chemistry": avg_chem,
-            "Maths": avg_maths
-        }
-        best_subject = max(subject_avgs, key=subject_avgs.get)
-        
-        # Find best test
-        best_test_idx = df['total_percent'].idxmax()
-        best_test_name = df.loc[best_test_idx, 'test_name']
-        best_test_score = round(df.loc[best_test_idx, 'total_percent'])
-        
-        # Find improvement
         if len(df) >= 2:
             first_score = df.iloc[0]['total_percent']
             last_score = df.iloc[-1]['total_percent']
             improvement = last_score - first_score
             improvement_text = f"improved by {improvement:.1f}%" if improvement > 0 else f"decreased by {abs(improvement):.1f}%"
         else:
-            improvement_text = "not enough data"
+            improvement_text = "not enough data for trend analysis"
         
         st.info(f"""
-        📌 **Your Strengths:** You perform best in **{best_subject}** with {subject_avgs[best_subject]}% average.
+        📌 **Tests Attended:** {len(df)} tests
         
-        🏆 **Best Performance:** Your highest score was in **{best_test_name}** with {best_test_score}% total.
+        📈 **Progress:** Your performance has {improvement_text}
         
-        📈 **Progress:** Your performance has {improvement_text} over {len(df)} tests.
+        🏆 **Best Score:** {int(df['total_percent'].max())}% in {df.loc[df['total_percent'].idxmax(), 'test_name']}
         """)
         
         # Logout
@@ -479,16 +409,6 @@ else:
         if st.button("🚪 Logout", type="secondary", use_container_width=True):
             st.session_state.logged_in = False
             st.session_state.student_name = ""
-            st.session_state.student_data = None
             st.rerun()
         
-        # Footer
         st.caption("⚠️ **Note:** BRTEST format has Physics & Chemistry out of 50 marks. Other tests have all subjects out of 100.")
-
-# ========================
-# SIDEBAR INFO
-# ========================
-with st.sidebar:
-    st.markdown("---")
-    st.caption(f"📅 Dashboard loaded at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    st.caption("💡 Contact your teacher for any discrepancies")
