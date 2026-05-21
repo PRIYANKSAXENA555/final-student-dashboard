@@ -20,6 +20,29 @@ st.set_page_config(
 def load_students():
     """Load students from CSV file"""
     df = pd.read_csv("students.csv")
+    # Handle different column name possibilities
+    if 'name' in df.columns:
+        name_col = 'name'
+    elif 'STUDENT NAME' in df.columns:
+        name_col = 'STUDENT NAME'
+    elif 'Name' in df.columns:
+        name_col = 'Name'
+    else:
+        # Use first column as name
+        name_col = df.columns[0]
+    
+    if 'mother_name' in df.columns:
+        mother_col = 'mother_name'
+    elif 'MOTHER NAME' in df.columns:
+        mother_col = 'MOTHER NAME'
+    elif 'Mother' in df.columns:
+        mother_col = 'Mother'
+    else:
+        # Use second column as mother name
+        mother_col = df.columns[1]
+    
+    # Rename for consistency
+    df = df.rename(columns={name_col: 'name', mother_col: 'mother_name'})
     return df
 
 @st.cache_data(ttl=3600)
@@ -27,7 +50,7 @@ def load_all_test_sheets():
     """Load and process all test sheets from Excel"""
     xl = pd.ExcelFile("StudentMarks.xlsx")
     
-    # Get all test sheets (BATCH, GRAND, BTEST, BRTEST)
+    # Get all test sheets
     test_sheets = []
     for sheet in xl.sheet_names:
         sheet_upper = sheet.upper()
@@ -39,7 +62,7 @@ def load_all_test_sheets():
     for sheet_name in test_sheets:
         df = pd.read_excel(xl, sheet_name=sheet_name, header=None)
         
-        # Find header row (where "TOTAL RANK" appears)
+        # Find header row
         header_row = None
         for i, row in df.iterrows():
             if "TOTAL RANK" in str(row.iloc[0]):
@@ -49,10 +72,8 @@ def load_all_test_sheets():
         if header_row is None:
             continue
         
-        # Get headers
         headers = df.iloc[header_row].tolist()
         
-        # Find column indices
         try:
             name_col = headers.index("STUDENT NAME")
             phy_col = headers.index("PHY")
@@ -63,10 +84,8 @@ def load_all_test_sheets():
         except ValueError:
             continue
         
-        # Extract data
         data_df = df.iloc[header_row + 1:].reset_index(drop=True)
         
-        # Create clean dataframe
         records = []
         for i in range(len(data_df)):
             student_name = data_df.iloc[i, name_col]
@@ -82,7 +101,6 @@ def load_all_test_sheets():
         
         if records:
             df_clean = pd.DataFrame(records)
-            # Determine test type
             is_brtest = "BRTEST" in sheet_name.upper()
             max_phy_chem = 50 if is_brtest else 100
             
@@ -160,18 +178,6 @@ st.markdown("""
         font-size: 0.8rem;
         margin-top: 0.5rem;
     }
-    .score-good {
-        color: #2e7d32;
-        font-weight: bold;
-    }
-    .score-avg {
-        color: #ed6c02;
-        font-weight: bold;
-    }
-    .score-bad {
-        color: #d32f2f;
-        font-weight: bold;
-    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -196,47 +202,40 @@ if not st.session_state.logged_in:
     with st.container():
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            students_df = load_students()
-            
-            # Searchable dropdown
-            selected_name = st.selectbox(
-                "📝 Select Your Name",
-                options=sorted(students_df['name'].tolist()),
-                index=None,
-                placeholder="Type or select your name...",
-                key="name_select"
-            )
-            
-            mother_name = st.text_input(
-                "👩 Mother's Name (Password)",
-                type="password",
-                placeholder="Enter mother's name in lowercase",
-                key="password_input"
-            )
-            
-            col_a, col_b = st.columns(2)
-            with col_a:
-                login_clicked = st.button("🔐 Login", type="primary", use_container_width=True)
-            with col_b:
-                if st.button("🔄 Reset", use_container_width=True):
-                    st.rerun()
-            
-            if login_clicked:
-                if selected_name and mother_name:
-                    student_row = students_df[students_df['name'] == selected_name].iloc[0]
-                    if student_row['mother_name'].lower() == mother_name.lower():
-                        st.session_state.logged_in = True
-                        st.session_state.student_name = selected_name
-                        st.rerun()
+            try:
+                students_df = load_students()
+                
+                selected_name = st.selectbox(
+                    "📝 Select Your Name",
+                    options=sorted(students_df['name'].tolist()),
+                    index=None,
+                    placeholder="Type or select your name..."
+                )
+                
+                mother_name = st.text_input(
+                    "👩 Mother's Name (Password)",
+                    type="password",
+                    placeholder="Enter mother's name in lowercase"
+                )
+                
+                if st.button("🔐 Login", type="primary", use_container_width=True):
+                    if selected_name and mother_name:
+                        student_row = students_df[students_df['name'] == selected_name].iloc[0]
+                        if student_row['mother_name'].lower() == mother_name.lower():
+                            st.session_state.logged_in = True
+                            st.session_state.student_name = selected_name
+                            st.rerun()
+                        else:
+                            st.error("❌ Invalid mother's name")
                     else:
-                        st.error("❌ Invalid mother's name. Please check and try again.")
-                else:
-                    st.warning("Please select your name and enter password")
+                        st.warning("Please select your name and enter password")
+            except Exception as e:
+                st.error(f"Error loading student data: {e}")
+                st.info("Please make sure students.csv has columns: 'name' and 'mother_name'")
     
     st.markdown("""
         <div style="text-align: center; margin-top: 2rem; color: rgba(255,255,255,0.7); font-size: 12px;">
-            ⓘ Password is your mother's name in <strong>small letters</strong><br>
-            Contact your teacher if you cannot login
+            ⓘ Password is your mother's name in <strong>small letters</strong>
         </div>
     """, unsafe_allow_html=True)
 
@@ -244,24 +243,16 @@ if not st.session_state.logged_in:
 # DASHBOARD
 # ========================
 else:
-    # Load data
     with st.spinner("Loading your dashboard..."):
         all_tests = load_all_test_sheets()
         student_records = get_student_data(st.session_state.student_name, all_tests)
     
     if not student_records:
         st.error(f"❌ No test records found for {st.session_state.student_name}")
-        st.info("""
-            **Possible reasons:**
-            - You haven't taken any tests yet
-            - Your name in the test sheets might be spelled differently
-            - Contact your teacher for assistance
-        """)
         if st.button("← Back to Login"):
             st.session_state.logged_in = False
             st.rerun()
     else:
-        # Header
         st.markdown(f"""
             <div class="main-header">
                 <h1>📊 Student Performance Dashboard</h1>
@@ -269,75 +260,34 @@ else:
             </div>
         """, unsafe_allow_html=True)
         
-        # Convert to DataFrame
         df = pd.DataFrame(student_records)
         
-        # Calculate percentages
         df['phy_percent'] = (df['phy'] / df['max_phy_chem']) * 100
         df['chem_percent'] = (df['chem'] / df['max_phy_chem']) * 100
         df['maths_percent'] = (df['maths'] / 100) * 100
         df['total_percent'] = (df['total'] / (df['max_phy_chem'] * 2 + 100)) * 100
         
-        # Statistics Cards
+        # Statistics
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         
         with col1:
-            st.markdown(f"""
-                <div class="stat-card">
-                    <div class="stat-value">{len(df)}</div>
-                    <div class="stat-label">Tests Taken</div>
-                </div>
-            """, unsafe_allow_html=True)
-        
+            st.metric("Tests Taken", len(df))
         with col2:
-            avg_phy = round(df['phy_percent'].mean())
-            st.markdown(f"""
-                <div class="stat-card">
-                    <div class="stat-value">{avg_phy}%</div>
-                    <div class="stat-label">Avg Physics</div>
-                </div>
-            """, unsafe_allow_html=True)
-        
+            st.metric("Avg Physics", f"{round(df['phy_percent'].mean())}%")
         with col3:
-            avg_chem = round(df['chem_percent'].mean())
-            st.markdown(f"""
-                <div class="stat-card">
-                    <div class="stat-value">{avg_chem}%</div>
-                    <div class="stat-label">Avg Chemistry</div>
-                </div>
-            """, unsafe_allow_html=True)
-        
+            st.metric("Avg Chemistry", f"{round(df['chem_percent'].mean())}%")
         with col4:
-            avg_maths = round(df['maths_percent'].mean())
-            st.markdown(f"""
-                <div class="stat-card">
-                    <div class="stat-value">{avg_maths}%</div>
-                    <div class="stat-label">Avg Maths</div>
-                </div>
-            """, unsafe_allow_html=True)
-        
+            st.metric("Avg Maths", f"{round(df['maths_percent'].mean())}%")
         with col5:
             valid_ranks = df[df['rank'].apply(lambda x: isinstance(x, (int, float)) and x > 0)]['rank']
             best_rank = int(valid_ranks.min()) if not valid_ranks.empty else "—"
-            st.markdown(f"""
-                <div class="stat-card">
-                    <div class="stat-value">{best_rank}</div>
-                    <div class="stat-label">Best Rank</div>
-                </div>
-            """, unsafe_allow_html=True)
-        
+            st.metric("Best Rank", best_rank)
         with col6:
-            avg_total = round(df['total_percent'].mean())
-            st.markdown(f"""
-                <div class="stat-card">
-                    <div class="stat-value">{avg_total}%</div>
-                    <div class="stat-label">Avg Total</div>
-                </div>
-            """, unsafe_allow_html=True)
+            st.metric("Avg Total", f"{round(df['total_percent'].mean())}%")
         
-        # Charts
         st.markdown("---")
         
+        # Charts
         col1, col2 = st.columns(2)
         
         with col1:
@@ -357,52 +307,17 @@ else:
                 "Total %": df['total_percent']
             }).set_index("Test"), height=350)
         
-        # Test History Table
+        # Test History
         st.markdown("---")
         st.subheader("📋 Detailed Test History")
         
-        # Format display table
         display_df = df[['test_name', 'phy', 'chem', 'maths', 'total', 'rank']].copy()
         display_df.columns = ['Test Name', 'Physics', 'Chemistry', 'Maths', 'Total', 'Rank']
-        
-        # Add max marks info
         display_df['Physics'] = df.apply(lambda x: f"{int(x['phy'])}/{x['max_phy_chem']}", axis=1)
         display_df['Chemistry'] = df.apply(lambda x: f"{int(x['chem'])}/{x['max_phy_chem']}", axis=1)
         display_df['Maths'] = df['maths'].astype(int).astype(str) + "/100"
         
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Test Name": st.column_config.TextColumn(width="medium"),
-                "Physics": st.column_config.TextColumn(width="small"),
-                "Chemistry": st.column_config.TextColumn(width="small"),
-                "Maths": st.column_config.TextColumn(width="small"),
-                "Total": st.column_config.NumberColumn(width="small"),
-                "Rank": st.column_config.NumberColumn(width="small"),
-            }
-        )
-        
-        # Performance Insights
-        st.markdown("---")
-        st.subheader("💡 Performance Insights")
-        
-        if len(df) >= 2:
-            first_score = df.iloc[0]['total_percent']
-            last_score = df.iloc[-1]['total_percent']
-            improvement = last_score - first_score
-            improvement_text = f"improved by {improvement:.1f}%" if improvement > 0 else f"decreased by {abs(improvement):.1f}%"
-        else:
-            improvement_text = "not enough data for trend analysis"
-        
-        st.info(f"""
-        📌 **Tests Attended:** {len(df)} tests
-        
-        📈 **Progress:** Your performance has {improvement_text}
-        
-        🏆 **Best Score:** {int(df['total_percent'].max())}% in {df.loc[df['total_percent'].idxmax(), 'test_name']}
-        """)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
         
         # Logout
         st.markdown("---")
