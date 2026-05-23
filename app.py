@@ -1,138 +1,21 @@
 import streamlit as st
 import pandas as pd
+import plotly.graph_objects as go
+import numpy as np
 import re
-from datetime import datetime
+from collections import Counter
+import os
+import warnings
+warnings.filterwarnings('ignore')
 
 # ========================
 # PAGE CONFIGURATION
 # ========================
 st.set_page_config(
-    page_title="JEE Student Dashboard",
+    page_title="Student Performance Dashboard",
     page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="collapsed"
+    layout="wide"
 )
-
-# ========================
-# LOAD DATA WITH CACHING
-# ========================
-@st.cache_data(ttl=3600)
-def load_students():
-    """Load students from CSV file"""
-    df = pd.read_csv("students.csv")
-    # Handle different column name possibilities
-    if 'name' in df.columns:
-        name_col = 'name'
-    elif 'STUDENT NAME' in df.columns:
-        name_col = 'STUDENT NAME'
-    elif 'Name' in df.columns:
-        name_col = 'Name'
-    else:
-        # Use first column as name
-        name_col = df.columns[0]
-    
-    if 'mother_name' in df.columns:
-        mother_col = 'mother_name'
-    elif 'MOTHER NAME' in df.columns:
-        mother_col = 'MOTHER NAME'
-    elif 'Mother' in df.columns:
-        mother_col = 'Mother'
-    else:
-        # Use second column as mother name
-        mother_col = df.columns[1]
-    
-    # Rename for consistency
-    df = df.rename(columns={name_col: 'name', mother_col: 'mother_name'})
-    return df
-
-@st.cache_data(ttl=3600)
-def load_all_test_sheets():
-    """Load and process all test sheets from Excel"""
-    xl = pd.ExcelFile("StudentMarks.xlsx")
-    
-    # Get all test sheets
-    test_sheets = []
-    for sheet in xl.sheet_names:
-        sheet_upper = sheet.upper()
-        if any(x in sheet_upper for x in ["BATCH", "GRAND", "BTEST", "BRTEST"]):
-            test_sheets.append(sheet)
-    
-    all_test_data = {}
-    
-    for sheet_name in test_sheets:
-        df = pd.read_excel(xl, sheet_name=sheet_name, header=None)
-        
-        # Find header row
-        header_row = None
-        for i, row in df.iterrows():
-            if "TOTAL RANK" in str(row.iloc[0]):
-                header_row = i
-                break
-        
-        if header_row is None:
-            continue
-        
-        headers = df.iloc[header_row].tolist()
-        
-        try:
-            name_col = headers.index("STUDENT NAME")
-            phy_col = headers.index("PHY")
-            chem_col = headers.index("CHEM")
-            maths_col = headers.index("MATHS")
-            total_col = headers.index("TOTAL")
-            rank_col = headers.index("TOTAL RANK")
-        except ValueError:
-            continue
-        
-        data_df = df.iloc[header_row + 1:].reset_index(drop=True)
-        
-        records = []
-        for i in range(len(data_df)):
-            student_name = data_df.iloc[i, name_col]
-            if pd.notna(student_name):
-                records.append({
-                    "STUDENT NAME": str(student_name).strip(),
-                    "PHY": data_df.iloc[i, phy_col] if pd.notna(data_df.iloc[i, phy_col]) else 0,
-                    "CHEM": data_df.iloc[i, chem_col] if pd.notna(data_df.iloc[i, chem_col]) else 0,
-                    "MATHS": data_df.iloc[i, maths_col] if pd.notna(data_df.iloc[i, maths_col]) else 0,
-                    "TOTAL": data_df.iloc[i, total_col] if pd.notna(data_df.iloc[i, total_col]) else 0,
-                    "RANK": data_df.iloc[i, rank_col] if pd.notna(data_df.iloc[i, rank_col]) else "-",
-                })
-        
-        if records:
-            df_clean = pd.DataFrame(records)
-            is_brtest = "BRTEST" in sheet_name.upper()
-            max_phy_chem = 50 if is_brtest else 100
-            
-            all_test_data[sheet_name] = {
-                "data": df_clean,
-                "max_phy_chem": max_phy_chem,
-                "is_brtest": is_brtest
-            }
-    
-    return all_test_data
-
-def get_student_data(student_name, all_test_data):
-    """Get all test data for a specific student"""
-    student_records = []
-    
-    for sheet_name, sheet_info in all_test_data.items():
-        df = sheet_info["data"]
-        student_row = df[df["STUDENT NAME"].str.lower() == student_name.lower()]
-        
-        if not student_row.empty:
-            row = student_row.iloc[0]
-            student_records.append({
-                "test_name": sheet_name[:45],
-                "phy": row["PHY"],
-                "chem": row["CHEM"],
-                "maths": row["MATHS"],
-                "total": row["TOTAL"],
-                "rank": row["RANK"],
-                "max_phy_chem": sheet_info["max_phy_chem"]
-            })
-    
-    return student_records
 
 # ========================
 # CUSTOM CSS
@@ -150,12 +33,11 @@ st.markdown("""
         text-align: center;
         box-shadow: 0 4px 15px rgba(0,0,0,0.1);
     }
-    .main-header h1 {
-        color: #1e3c72;
-        margin-bottom: 0.5rem;
-    }
-    .main-header p {
-        color: #666;
+    .student-header {
+        background: linear-gradient(135deg, #1a1a2e, #16213e, #0f3460);
+        padding: 20px;
+        border-radius: 15px;
+        margin-bottom: 20px;
     }
     .stat-card {
         background: white;
@@ -182,11 +64,182 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ========================
+# FILE PATHS
+# ========================
+EXCEL_FILE_PATH = "StudentMarks.xlsx"
+CSV_FILE_PATH = "students.csv"
+
+# ========================
+# HELPER FUNCTIONS
+# ========================
+def detect_test_type(sheet_name):
+    if sheet_name.upper().startswith("BRTEST"):
+        return "BRTEST"
+    return "BTEST"
+
+def normalize_name(name):
+    if pd.isna(name):
+        return None
+    name = str(name).upper().strip()
+    name = re.sub(r'\s+', ' ', name)
+    name = name.replace('KILKARNI', 'KULKARNI')
+    if len(name) < 3:
+        return None
+    return name
+
+def get_weakest_subject(phy_rank, chem_rank, math_rank):
+    if pd.isna(phy_rank) or pd.isna(chem_rank) or pd.isna(math_rank):
+        return "Absent"
+    p, c, m = float(phy_rank), float(chem_rank), float(math_rank)
+    if max(p, c, m) - min(p, c, m) <= 30:
+        return "Balanced"
+    ranks = {'Physics': p, 'Chemistry': c, 'Maths': m}
+    weakest = max(ranks, key=ranks.get)
+    other_avg = (sum(ranks.values()) - ranks[weakest]) / 2
+    if ranks[weakest] > 1.5 * other_avg:
+        return weakest
+    return "Balanced"
+
+@st.cache_data(ttl=3600)
+def load_students():
+    """Load students from CSV file"""
+    try:
+        df = pd.read_csv(CSV_FILE_PATH)
+        # Handle different column name possibilities
+        if 'name' in df.columns:
+            name_col = 'name'
+        elif 'STUDENT NAME' in df.columns:
+            name_col = 'STUDENT NAME'
+        elif 'Name' in df.columns:
+            name_col = 'Name'
+        else:
+            name_col = df.columns[0]
+        
+        if 'mother_name' in df.columns:
+            mother_col = 'mother_name'
+        elif 'MOTHER NAME' in df.columns:
+            mother_col = 'MOTHER NAME'
+        elif 'Mother' in df.columns:
+            mother_col = 'Mother'
+        else:
+            mother_col = df.columns[1]
+        
+        df = df.rename(columns={name_col: 'name', mother_col: 'mother_name'})
+        return df
+    except Exception as e:
+        st.error(f"Error loading students.csv: {e}")
+        return pd.DataFrame(columns=['name', 'mother_name'])
+
+@st.cache_data(ttl=3600)
+def load_excel_data():
+    """Load all test data from Excel file"""
+    all_student_data = {}
+    test_metadata = {}
+    
+    try:
+        if not os.path.exists(EXCEL_FILE_PATH):
+            st.error(f"Excel file not found: {EXCEL_FILE_PATH}")
+            return None, None
+        
+        xl = pd.ExcelFile(EXCEL_FILE_PATH)
+        
+        # Get test sheets
+        test_sheets = []
+        for s in xl.sheet_names:
+            s_upper = s.upper()
+            if "SUMMARY" not in s_upper and "ANALYSIS" not in s_upper and "SHEET20" not in s_upper and "SHEET1" not in s_upper:
+                test_sheets.append(s)
+        
+        for idx, sheet in enumerate(test_sheets, start=1):
+            test_type = detect_test_type(sheet)
+            
+            if test_type == "BRTEST":
+                max_phy, max_chem, max_math = 50, 50, 100
+                max_total = 200
+            else:
+                max_phy, max_chem, max_math = 100, 100, 100
+                max_total = 300
+
+            test_metadata[sheet] = {
+                "type": test_type, "index": idx,
+                "max_phy": max_phy, "max_chem": max_chem,
+                "max_math": max_math, "max_total": max_total
+            }
+
+            try:
+                # Read with skiprows=7 (adjust if needed)
+                df = pd.read_excel(xl, sheet_name=sheet, skiprows=7)
+                
+                if len(df.columns) >= 10:
+                    overall_rank_col = df.columns[0]
+                    name_col = df.columns[1]
+                    roll_col = df.columns[2]
+                    phy_col = df.columns[3]
+                    phy_rank_col = df.columns[4]
+                    chem_col = df.columns[5]
+                    chem_rank_col = df.columns[6]
+                    math_col = df.columns[7]
+                    math_rank_col = df.columns[8]
+                    total_col = df.columns[9]
+                    
+                    for _, row in df.iterrows():
+                        if pd.isna(row[name_col]) and pd.isna(row[roll_col]):
+                            continue
+                        
+                        student_name = normalize_name(row[name_col])
+                        if not student_name:
+                            continue
+                        
+                        roll_no = pd.to_numeric(row[roll_col], errors='coerce')
+                        total = pd.to_numeric(row[total_col], errors='coerce')
+                        overall_rank = pd.to_numeric(row[overall_rank_col], errors='coerce')
+                        
+                        if pd.isna(total) or total < 0:
+                            continue
+                        
+                        if student_name not in all_student_data:
+                            all_student_data[student_name] = {
+                                "name": student_name, "roll_numbers": set(), "tests": {}
+                            }
+                        
+                        if pd.notna(roll_no):
+                            all_student_data[student_name]["roll_numbers"].add(int(roll_no))
+                        
+                        phy = pd.to_numeric(row[phy_col], errors='coerce')
+                        chem = pd.to_numeric(row[chem_col], errors='coerce')
+                        math_score = pd.to_numeric(row[math_col], errors='coerce')
+                        phy_rank = pd.to_numeric(row[phy_rank_col], errors='coerce')
+                        chem_rank = pd.to_numeric(row[chem_rank_col], errors='coerce')
+                        math_rank = pd.to_numeric(row[math_rank_col], errors='coerce')
+                        
+                        all_student_data[student_name]["tests"][sheet] = {
+                            "phy": phy if pd.notna(phy) else 0,
+                            "chem": chem if pd.notna(chem) else 0,
+                            "math": math_score if pd.notna(math_score) else 0,
+                            "phy_rank": phy_rank if pd.notna(phy_rank) else None,
+                            "chem_rank": chem_rank if pd.notna(chem_rank) else None,
+                            "math_rank": math_rank if pd.notna(math_rank) else None,
+                            "total": total,
+                            "overall_rank": overall_rank if pd.notna(overall_rank) else None,
+                            "type": test_type
+                        }
+                        
+            except Exception as e:
+                continue
+        
+        return all_student_data, test_metadata
+        
+    except Exception as e:
+        st.error(f"Error loading file: {str(e)}")
+        return None, None
+
+# ========================
 # SESSION STATE
 # ========================
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.student_name = ""
+    st.session_state.student_data = None
 
 # ========================
 # LOGIN PAGE
@@ -202,36 +255,36 @@ if not st.session_state.logged_in:
     with st.container():
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            try:
-                students_df = load_students()
-                
-                selected_name = st.selectbox(
-                    "📝 Select Your Name",
-                    options=sorted(students_df['name'].tolist()),
-                    index=None,
-                    placeholder="Type or select your name..."
-                )
-                
-                mother_name = st.text_input(
-                    "👩 Mother's Name (Password)",
-                    type="password",
-                    placeholder="Enter mother's name in lowercase"
-                )
-                
-                if st.button("🔐 Login", type="primary", use_container_width=True):
-                    if selected_name and mother_name:
-                        student_row = students_df[students_df['name'] == selected_name].iloc[0]
-                        if student_row['mother_name'].lower() == mother_name.lower():
-                            st.session_state.logged_in = True
-                            st.session_state.student_name = selected_name
-                            st.rerun()
-                        else:
-                            st.error("❌ Invalid mother's name")
+            students_df = load_students()
+            
+            if students_df.empty:
+                st.error("No student data found. Please check students.csv file.")
+                st.stop()
+            
+            selected_name = st.selectbox(
+                "📝 Select Your Name",
+                options=sorted(students_df['name'].tolist()),
+                index=None,
+                placeholder="Type or select your name..."
+            )
+            
+            mother_name = st.text_input(
+                "👩 Mother's Name (Password)",
+                type="password",
+                placeholder="Enter mother's name in lowercase"
+            )
+            
+            if st.button("🔐 Login", type="primary", use_container_width=True):
+                if selected_name and mother_name:
+                    student_row = students_df[students_df['name'] == selected_name].iloc[0]
+                    if student_row['mother_name'].lower() == mother_name.lower():
+                        st.session_state.logged_in = True
+                        st.session_state.student_name = selected_name
+                        st.rerun()
                     else:
-                        st.warning("Please select your name and enter password")
-            except Exception as e:
-                st.error(f"Error loading student data: {e}")
-                st.info("Please make sure students.csv has columns: 'name' and 'mother_name'")
+                        st.error("❌ Invalid mother's name")
+                else:
+                    st.warning("Please select your name and enter password")
     
     st.markdown("""
         <div style="text-align: center; margin-top: 2rem; color: rgba(255,255,255,0.7); font-size: 12px;">
@@ -243,87 +296,419 @@ if not st.session_state.logged_in:
 # DASHBOARD
 # ========================
 else:
-    with st.spinner("Loading your dashboard..."):
-        all_tests = load_all_test_sheets()
-        student_records = get_student_data(st.session_state.student_name, all_tests)
+    with st.spinner("🔄 Loading your data..."):
+        all_student_data, test_metadata = load_excel_data()
     
-    if not student_records:
-        st.error(f"❌ No test records found for {st.session_state.student_name}")
+    if all_student_data is None or len(all_student_data) == 0:
+        st.error("❌ No student data found. Please check the Excel file.")
         if st.button("← Back to Login"):
             st.session_state.logged_in = False
             st.rerun()
-    else:
-        st.markdown(f"""
-            <div class="main-header">
-                <h1>📊 Student Performance Dashboard</h1>
-                <p><strong>{st.session_state.student_name}</strong></p>
-            </div>
-        """, unsafe_allow_html=True)
-        
-        df = pd.DataFrame(student_records)
-        
-        df['phy_percent'] = (df['phy'] / df['max_phy_chem']) * 100
-        df['chem_percent'] = (df['chem'] / df['max_phy_chem']) * 100
-        df['maths_percent'] = (df['maths'] / 100) * 100
-        df['total_percent'] = (df['total'] / (df['max_phy_chem'] * 2 + 100)) * 100
-        
-        # Statistics
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
-        
-        with col1:
-            st.metric("Tests Taken", len(df))
-        with col2:
-            st.metric("Avg Physics", f"{round(df['phy_percent'].mean())}%")
-        with col3:
-            st.metric("Avg Chemistry", f"{round(df['chem_percent'].mean())}%")
-        with col4:
-            st.metric("Avg Maths", f"{round(df['maths_percent'].mean())}%")
-        with col5:
-            valid_ranks = df[df['rank'].apply(lambda x: isinstance(x, (int, float)) and x > 0)]['rank']
-            best_rank = int(valid_ranks.min()) if not valid_ranks.empty else "—"
-            st.metric("Best Rank", best_rank)
-        with col6:
-            st.metric("Avg Total", f"{round(df['total_percent'].mean())}%")
-        
-        st.markdown("---")
-        
-        # Charts
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("📈 Subject-wise Progress")
-            chart_data = pd.DataFrame({
-                "Test": df['test_name'],
-                "Physics": df['phy_percent'],
-                "Chemistry": df['chem_percent'],
-                "Maths": df['maths_percent']
-            })
-            st.line_chart(chart_data.set_index("Test"), height=350)
-        
-        with col2:
-            st.subheader("🏆 Overall Performance")
-            st.bar_chart(pd.DataFrame({
-                "Test": df['test_name'],
-                "Total %": df['total_percent']
-            }).set_index("Test"), height=350)
-        
-        # Test History
-        st.markdown("---")
-        st.subheader("📋 Detailed Test History")
-        
-        display_df = df[['test_name', 'phy', 'chem', 'maths', 'total', 'rank']].copy()
-        display_df.columns = ['Test Name', 'Physics', 'Chemistry', 'Maths', 'Total', 'Rank']
-        display_df['Physics'] = df.apply(lambda x: f"{int(x['phy'])}/{x['max_phy_chem']}", axis=1)
-        display_df['Chemistry'] = df.apply(lambda x: f"{int(x['chem'])}/{x['max_phy_chem']}", axis=1)
-        display_df['Maths'] = df['maths'].astype(int).astype(str) + "/100"
-        
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-        
-        # Logout
-        st.markdown("---")
-        if st.button("🚪 Logout", type="secondary", use_container_width=True):
+        st.stop()
+    
+    student = all_student_data.get(st.session_state.student_name.upper())
+    
+    if not student:
+        st.error(f"❌ No test records found for {st.session_state.student_name}")
+        st.info("Possible reasons: The name might be spelled differently in the Excel file.")
+        if st.button("← Back to Login"):
             st.session_state.logged_in = False
-            st.session_state.student_name = ""
             st.rerun()
+        st.stop()
+    
+    # Process student data
+    btest_results = []
+    brtest_results = []
+    
+    all_overall_ranks = []
+    all_phy_ranks = []
+    all_chem_ranks = []
+    all_math_ranks = []
+    
+    for sheet, meta in test_metadata.items():
+        if sheet not in student["tests"]:
+            continue
         
-        st.caption("⚠️ **Note:** BRTEST format has Physics & Chemistry out of 50 marks. Other tests have all subjects out of 100.")
+        marks = student["tests"][sheet]
+        pct = round((marks["total"] / meta["max_total"]) * 100, 1)
+        
+        overall_rank = marks.get("overall_rank")
+        
+        if overall_rank is None or pd.isna(overall_rank):
+            all_scores = []
+            for s_data in all_student_data.values():
+                if sheet in s_data["tests"]:
+                    all_scores.append(s_data["tests"][sheet]["total"])
+            overall_rank = sum(score > marks["total"] for score in all_scores) + 1
+        else:
+            overall_rank = int(overall_rank)
+        
+        all_overall_ranks.append(overall_rank)
+        if marks.get("phy_rank") is not None and not pd.isna(marks.get("phy_rank")):
+            all_phy_ranks.append(int(marks.get("phy_rank")))
+        if marks.get("chem_rank") is not None and not pd.isna(marks.get("chem_rank")):
+            all_chem_ranks.append(int(marks.get("chem_rank")))
+        if marks.get("math_rank") is not None and not pd.isna(marks.get("math_rank")):
+            all_math_ranks.append(int(marks.get("math_rank")))
+        
+        weakest = get_weakest_subject(marks.get("phy_rank"), marks.get("chem_rank"), marks.get("math_rank"))
+        
+        phy_pct = round((marks["phy"] / meta["max_phy"]) * 100, 1) if marks["phy"] > 0 else 0
+        chem_pct = round((marks["chem"] / meta["max_chem"]) * 100, 1) if marks["chem"] > 0 else 0
+        math_pct = round((marks["math"] / meta["max_math"]) * 100, 1) if marks["math"] > 0 else 0
+        
+        result = {
+            "S.No.": meta["index"],
+            "Test Name": sheet,
+            "Type": meta["type"],
+            "Physics": marks["phy"],
+            "Physics %": phy_pct,
+            "Phy Rank": marks.get("phy_rank") if marks.get("phy_rank") is not None else '-',
+            "Chemistry": marks["chem"],
+            "Chemistry %": chem_pct,
+            "Chem Rank": marks.get("chem_rank") if marks.get("chem_rank") is not None else '-',
+            "Maths": marks["math"],
+            "Maths %": math_pct,
+            "Math Rank": marks.get("math_rank") if marks.get("math_rank") is not None else '-',
+            "Total": f"{marks['total']:.0f}/{meta['max_total']}",
+            "%": f"{pct}%",
+            "Overall Rank": overall_rank,
+            "Weakest Subject": weakest
+        }
+        
+        if meta["type"] == "BTEST":
+            btest_results.append(result)
+        else:
+            brtest_results.append(result)
+    
+    btest_results.sort(key=lambda x: x["S.No."])
+    brtest_results.sort(key=lambda x: x["S.No."])
+    
+    all_tests = btest_results + brtest_results
+    avg_pct = round(np.mean([float(t["%"].replace("%", "")) for t in all_tests]), 1) if all_tests else 0
+    
+    best_overall_rank = min(all_overall_ranks) if all_overall_ranks else 'N/A'
+    worst_overall_rank = max(all_overall_ranks) if all_overall_ranks else 'N/A'
+    best_phy_rank = min(all_phy_ranks) if all_phy_ranks else 'N/A'
+    worst_phy_rank = max(all_phy_ranks) if all_phy_ranks else 'N/A'
+    best_chem_rank = min(all_chem_ranks) if all_chem_ranks else 'N/A'
+    worst_chem_rank = max(all_chem_ranks) if all_chem_ranks else 'N/A'
+    best_math_rank = min(all_math_ranks) if all_math_ranks else 'N/A'
+    worst_math_rank = max(all_math_ranks) if all_math_ranks else 'N/A'
+    
+    roll_numbers_display = ", ".join([str(r) for r in sorted(student["roll_numbers"])])
+    
+    weak_subjects = [t["Weakest Subject"] for t in all_tests if t["Weakest Subject"] not in ["Balanced", "Absent"]]
+    weak_count = Counter(weak_subjects)
+    
+    # ============================================================
+    # STUDENT INFO HEADER
+    # ============================================================
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);
+                padding:20px;
+                border-radius:15px;
+                margin-bottom:20px;">
+        <h2 style="color:white; margin:0;">🎓 {st.session_state.student_name}</h2>
+        <p style="color:white; margin:5px 0 0 0;">Roll Number(s): {roll_numbers_display}</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # ============================================================
+    # TEST SUMMARY METRICS
+    # ============================================================
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("📚 Tests Attempted", f"{len(all_tests)}/{len(test_metadata)}")
+    with col2:
+        st.metric("📊 Average Score", f"{avg_pct}%")
+    with col3:
+        st.metric("🏆 Best Overall Rank", best_overall_rank)
+    with col4:
+        st.metric("⚠️ Worst Overall Rank", worst_overall_rank)
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # SUBJECT RANK SUMMARY
+    # ============================================================
+    st.subheader("📊 Subject-wise Rank Summary")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.info("**🔬 Physics**")
+        st.metric("Best Rank", best_phy_rank, delta="⭐")
+        st.metric("Worst Rank", worst_phy_rank, delta="⚠️")
+    
+    with col2:
+        st.info("**⚗️ Chemistry**")
+        st.metric("Best Rank", best_chem_rank, delta="⭐")
+        st.metric("Worst Rank", worst_chem_rank, delta="⚠️")
+    
+    with col3:
+        st.info("**📐 Mathematics**")
+        st.metric("Best Rank", best_math_rank, delta="⭐")
+        st.metric("Worst Rank", worst_math_rank, delta="⚠️")
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # WEAK SUBJECT SUMMARY
+    # ============================================================
+    if weak_count:
+        st.subheader("⚠️ Weak Subject Analysis")
+        weak_cols = st.columns(len(weak_count))
+        for i, (subject, count) in enumerate(weak_count.items()):
+            with weak_cols[i]:
+                st.warning(f"⚠️ {subject}")
+                st.metric("Weak in", f"{count} test(s)")
+        st.markdown("---")
+    
+    # ============================================================
+    # BTEST RESULTS TABLE
+    # ============================================================
+    if btest_results:
+        with st.expander("📘 BTEST/GRAND TESTS (JEE Format - 300 marks)", expanded=True):
+            display_cols = ['Test Name', 'Physics', 'Phy Rank', 'Chemistry', 'Chem Rank', 
+                           'Maths', 'Math Rank', 'Total', '%', 'Overall Rank', 'Weakest Subject']
+            btest_df = pd.DataFrame(btest_results)
+            st.dataframe(btest_df[display_cols], use_container_width=True)
+    
+    # ============================================================
+    # BRTEST RESULTS TABLE
+    # ============================================================
+    if brtest_results:
+        with st.expander("📘 BRTEST TESTS (CET Format - 200 marks)", expanded=True):
+            display_cols = ['Test Name', 'Physics', 'Phy Rank', 'Chemistry', 'Chem Rank', 
+                           'Maths', 'Math Rank', 'Total', '%', 'Overall Rank', 'Weakest Subject']
+            brtest_df = pd.DataFrame(brtest_results)
+            st.dataframe(brtest_df[display_cols], use_container_width=True)
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # SUBJECT MARKS TRENDS - BTEST
+    # ============================================================
+    if btest_results:
+        st.subheader("📊 Subject Marks Trends - BTEST Tests")
+        
+        btest_names = [t['Test Name'][:20] for t in btest_results]
+        
+        fig_marks = go.Figure()
+        fig_marks.add_trace(go.Scatter(x=btest_names, y=[t['Physics'] for t in btest_results], 
+                                        mode='lines+markers', name='Physics', 
+                                        line=dict(color='#3498DB', width=2), marker=dict(size=8)))
+        fig_marks.add_trace(go.Scatter(x=btest_names, y=[t['Chemistry'] for t in btest_results], 
+                                        mode='lines+markers', name='Chemistry', 
+                                        line=dict(color='#9B59B6', width=2), marker=dict(size=8)))
+        fig_marks.add_trace(go.Scatter(x=btest_names, y=[t['Maths'] for t in btest_results], 
+                                        mode='lines+markers', name='Mathematics', 
+                                        line=dict(color='#F1C40F', width=2), marker=dict(size=8)))
+        fig_marks.add_hline(y=75, line_dash="dash", line_color="green", annotation_text="75% Target")
+        fig_marks.update_layout(title="Subject Marks Comparison (BTEST)", height=400)
+        st.plotly_chart(fig_marks, use_container_width=True)
+    
+    # ============================================================
+    # SUBJECT RANK TRENDS - BTEST
+    # ============================================================
+    if btest_results:
+        st.subheader("🏆 Subject Rank Trends - BTEST Tests (Lower is Better)")
+        
+        fig_ranks_btest = go.Figure()
+        
+        btest_names_rank = [t['Test Name'][:20] for t in btest_results]
+        phy_ranks = [t['Phy Rank'] if t['Phy Rank'] != '-' else None for t in btest_results]
+        chem_ranks = [t['Chem Rank'] if t['Chem Rank'] != '-' else None for t in btest_results]
+        math_ranks = [t['Math Rank'] if t['Math Rank'] != '-' else None for t in btest_results]
+        
+        fig_ranks_btest.add_trace(go.Scatter(x=btest_names_rank, y=phy_ranks, 
+                                              mode='lines+markers', name='Physics Rank',
+                                              line=dict(color='#3498DB', width=2), marker=dict(size=8)))
+        fig_ranks_btest.add_trace(go.Scatter(x=btest_names_rank, y=chem_ranks, 
+                                              mode='lines+markers', name='Chemistry Rank',
+                                              line=dict(color='#9B59B6', width=2), marker=dict(size=8)))
+        fig_ranks_btest.add_trace(go.Scatter(x=btest_names_rank, y=math_ranks, 
+                                              mode='lines+markers', name='Mathematics Rank',
+                                              line=dict(color='#F1C40F', width=2), marker=dict(size=8)))
+        
+        fig_ranks_btest.update_layout(title="Subject Rank Comparison (BTEST)", 
+                                      yaxis=dict(autorange="reversed"), height=400)
+        st.plotly_chart(fig_ranks_btest, use_container_width=True)
+    
+    # ============================================================
+    # OVERALL RANK TREND - BTEST
+    # ============================================================
+    if btest_results:
+        st.subheader("🏆 Overall Rank Trend - BTEST Tests (Lower is Better)")
+        
+        fig_rank_btest = go.Figure()
+        btest_overall_ranks = [t['Overall Rank'] for t in btest_results]
+        
+        fig_rank_btest.add_trace(go.Scatter(x=btest_names_rank, y=btest_overall_ranks,
+                                             mode='lines+markers', name='Overall Rank',
+                                             line=dict(color='#FF6B6B', width=3), marker=dict(size=10)))
+        best_btest_rank = min(btest_overall_ranks) if btest_overall_ranks else None
+        if best_btest_rank:
+            fig_rank_btest.add_hline(y=best_btest_rank, line_dash="dash", line_color="green", 
+                                    annotation_text=f"Best: {best_btest_rank}")
+        
+        fig_rank_btest.update_layout(title="Overall Rank Performance (BTEST)", 
+                                     yaxis=dict(autorange="reversed"), height=400)
+        st.plotly_chart(fig_rank_btest, use_container_width=True)
+    
+    # ============================================================
+    # SUBJECT MARKS TRENDS - BRTEST
+    # ============================================================
+    if brtest_results:
+        st.subheader("📊 Subject Marks Trends - BRTEST Tests (CET Format)")
+        
+        brtest_names = [t['Test Name'][:20] for t in brtest_results]
+        
+        fig_marks_brtest = go.Figure()
+        fig_marks_brtest.add_trace(go.Scatter(x=brtest_names, y=[t['Physics'] for t in brtest_results], 
+                                               mode='lines+markers', name='Physics (max 50)', 
+                                               line=dict(color='#3498DB', width=2), marker=dict(size=8)))
+        fig_marks_brtest.add_trace(go.Scatter(x=brtest_names, y=[t['Chemistry'] for t in brtest_results], 
+                                               mode='lines+markers', name='Chemistry (max 50)', 
+                                               line=dict(color='#9B59B6', width=2), marker=dict(size=8)))
+        fig_marks_brtest.add_trace(go.Scatter(x=brtest_names, y=[t['Maths'] for t in brtest_results], 
+                                               mode='lines+markers', name='Mathematics (max 100)', 
+                                               line=dict(color='#F1C40F', width=2), marker=dict(size=8)))
+        fig_marks_brtest.update_layout(title="Subject Marks Comparison (BRTEST - CET Format)", height=400)
+        st.plotly_chart(fig_marks_brtest, use_container_width=True)
+    
+    # ============================================================
+    # SUBJECT RANK TRENDS - BRTEST
+    # ============================================================
+    if brtest_results:
+        st.subheader("🏆 Subject Rank Trends - BRTEST Tests (Lower is Better)")
+        
+        fig_ranks_brtest = go.Figure()
+        
+        brtest_names_rank = [t['Test Name'][:20] for t in brtest_results]
+        phy_ranks_br = [t['Phy Rank'] if t['Phy Rank'] != '-' else None for t in brtest_results]
+        chem_ranks_br = [t['Chem Rank'] if t['Chem Rank'] != '-' else None for t in brtest_results]
+        math_ranks_br = [t['Math Rank'] if t['Math Rank'] != '-' else None for t in brtest_results]
+        
+        fig_ranks_brtest.add_trace(go.Scatter(x=brtest_names_rank, y=phy_ranks_br, 
+                                               mode='lines+markers', name='Physics Rank',
+                                               line=dict(color='#3498DB', width=2), marker=dict(size=8)))
+        fig_ranks_brtest.add_trace(go.Scatter(x=brtest_names_rank, y=chem_ranks_br, 
+                                               mode='lines+markers', name='Chemistry Rank',
+                                               line=dict(color='#9B59B6', width=2), marker=dict(size=8)))
+        fig_ranks_brtest.add_trace(go.Scatter(x=brtest_names_rank, y=math_ranks_br, 
+                                               mode='lines+markers', name='Mathematics Rank',
+                                               line=dict(color='#F1C40F', width=2), marker=dict(size=8)))
+        
+        fig_ranks_brtest.update_layout(title="Subject Rank Comparison (BRTEST)", 
+                                       yaxis=dict(autorange="reversed"), height=400)
+        st.plotly_chart(fig_ranks_brtest, use_container_width=True)
+    
+    # ============================================================
+    # OVERALL RANK TREND - BRTEST
+    # ============================================================
+    if brtest_results:
+        st.subheader("🏆 Overall Rank Trend - BRTEST Tests (Lower is Better)")
+        
+        fig_rank_brtest = go.Figure()
+        brtest_overall_ranks = [t['Overall Rank'] for t in brtest_results]
+        
+        fig_rank_brtest.add_trace(go.Scatter(x=brtest_names_rank, y=brtest_overall_ranks,
+                                              mode='lines+markers', name='Overall Rank',
+                                              line=dict(color='#FF6B6B', width=3), marker=dict(size=10)))
+        best_brtest_rank = min(brtest_overall_ranks) if brtest_overall_ranks else None
+        if best_brtest_rank:
+            fig_rank_brtest.add_hline(y=best_brtest_rank, line_dash="dash", line_color="green", 
+                                     annotation_text=f"Best: {best_brtest_rank}")
+        
+        fig_rank_brtest.update_layout(title="Overall Rank Performance (BRTEST)", 
+                                      yaxis=dict(autorange="reversed"), height=400)
+        st.plotly_chart(fig_rank_brtest, use_container_width=True)
+    
+    # ============================================================
+    # OVERALL PERCENTAGE TREND
+    # ============================================================
+    st.subheader("📈 Overall Percentage Trend")
+    all_names = [t['Test Name'][:20] for t in all_tests]
+    all_pcts = [float(t["%"].replace("%", "")) for t in all_tests]
+    
+    fig_trend = go.Figure()
+    
+    btest_indices = [i for i, t in enumerate(all_tests) if t['Type'] == 'BTEST']
+    brtest_indices = [i for i, t in enumerate(all_tests) if t['Type'] == 'BRTEST']
+    
+    if btest_indices:
+        fig_trend.add_trace(go.Scatter(
+            x=[all_names[i] for i in btest_indices],
+            y=[all_pcts[i] for i in btest_indices],
+            mode='lines+markers', name='BTEST (300 marks)',
+            line=dict(color='#3498DB', width=3), marker=dict(size=10)
+        ))
+    
+    if brtest_indices:
+        fig_trend.add_trace(go.Scatter(
+            x=[all_names[i] for i in brtest_indices],
+            y=[all_pcts[i] for i in brtest_indices],
+            mode='lines+markers', name='BRTEST (200 marks)',
+            line=dict(color='#E67E22', width=3), marker=dict(size=10, symbol='diamond')
+        ))
+    
+    fig_trend.add_hline(y=75, line_dash="dash", line_color="green", annotation_text="Target (75%)")
+    fig_trend.update_layout(title="Percentage Score Across All Tests", height=400)
+    st.plotly_chart(fig_trend, use_container_width=True)
+    
+    # ============================================================
+    # DETAILED WEAKNESS INSIGHTS
+    # ============================================================
+    st.subheader("📊 Detailed Weakness Analysis")
+    
+    subject_weakness = {'Physics': 0, 'Chemistry': 0, 'Maths': 0}
+    total_weak = len(weak_subjects)
+    
+    for ws in weak_subjects:
+        if ws in subject_weakness:
+            subject_weakness[ws] += 1
+    
+    if total_weak > 0:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("**Subject-wise weakness breakdown:**")
+            for subject, count in sorted(subject_weakness.items(), key=lambda x: x[1], reverse=True):
+                pct = (count / total_weak) * 100
+                st.write(f"• {subject}: {count} times ({pct:.0f}%)")
+                st.progress(int(pct))
+        
+        with col2:
+            weak_tests_list = [t for t in all_tests if t["Weakest Subject"] not in ["Balanced", "Absent"]]
+            if weak_tests_list:
+                st.write("**Tests with weakness:**")
+                for t in weak_tests_list[:5]:
+                    st.write(f"• {t['Test Name'][:35]} → {t['Weakest Subject']}")
+    
+    balanced_tests_list = [t for t in all_tests if t["Weakest Subject"] == "Balanced"]
+    if balanced_tests_list:
+        st.write(f"**✅ Balanced performance in {len(balanced_tests_list)} tests:**")
+        for t in balanced_tests_list[:5]:
+            st.write(f"• {t['Test Name'][:50]}")
+        if len(balanced_tests_list) > 5:
+            st.write(f"... and {len(balanced_tests_list) - 5} more")
+    
+    # Missing tests
+    attempted = set([t['Test Name'] for t in all_tests])
+    missing = [t for t in test_metadata.keys() if t not in attempted]
+    if missing:
+        st.write(f"**⚠️ ABSENT/NO DATA for {len(missing)} tests:**")
+        for m in missing[:10]:
+            st.write(f"• {m} ({test_metadata[m]['type']})")
+    
+    # ============================================================
+    # LOGOUT BUTTON
+    # ============================================================
+    st.markdown("---")
+    if st.button("🚪 Logout", type="secondary", use_container_width=True):
+        st.session_state.logged_in = False
+        st.session_state.student_name = ""
+        st.rerun()
+    
+    st.markdown("---")
+    st.caption("✅ Dashboard Complete | Data Source: Master Sheet Excel | Rank Analysis: Lower number = Better performance")
