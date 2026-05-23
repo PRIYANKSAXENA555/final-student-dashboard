@@ -247,7 +247,7 @@ if 'logged_in' not in st.session_state:
 if not st.session_state.logged_in:
     st.markdown("""
         <div class="main-header">
-            <h1>🔐 Student Portal</h1>
+            <h1>🔐Bakliwal Tutorial Solapur Student Portal</h1>
             <p>Login to view your performance dashboard</p>
         </div>
     """, unsafe_allow_html=True)
