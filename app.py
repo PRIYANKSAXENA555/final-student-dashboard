@@ -39,27 +39,6 @@ st.markdown("""
         border-radius: 15px;
         margin-bottom: 20px;
     }
-    .stat-card {
-        background: white;
-        padding: 1.2rem;
-        border-radius: 15px;
-        text-align: center;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-        transition: transform 0.2s;
-    }
-    .stat-card:hover {
-        transform: translateY(-3px);
-    }
-    .stat-value {
-        font-size: 2rem;
-        font-weight: bold;
-        color: #1e3c72;
-    }
-    .stat-label {
-        color: #666;
-        font-size: 0.8rem;
-        margin-top: 0.5rem;
-    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -78,11 +57,15 @@ def detect_test_type(sheet_name):
     return "BTEST"
 
 def normalize_name(name):
+    """Normalize name for matching"""
     if pd.isna(name):
         return None
     name = str(name).upper().strip()
+    # Remove extra spaces
     name = re.sub(r'\s+', ' ', name)
+    # Fix common spelling issues
     name = name.replace('KILKARNI', 'KULKARNI')
+    name = name.replace('HUGAR', 'JUJAGAR')  # Common typo
     if len(name) < 3:
         return None
     return name
@@ -125,21 +108,24 @@ def load_students():
             mother_col = df.columns[1]
         
         df = df.rename(columns={name_col: 'name', mother_col: 'mother_name'})
+        # Normalize names in CSV
+        df['normalized_name'] = df['name'].apply(lambda x: normalize_name(x) if pd.notna(x) else None)
         return df
     except Exception as e:
         st.error(f"Error loading students.csv: {e}")
-        return pd.DataFrame(columns=['name', 'mother_name'])
+        return pd.DataFrame(columns=['name', 'mother_name', 'normalized_name'])
 
 @st.cache_data(ttl=3600)
 def load_excel_data():
     """Load all test data from Excel file"""
     all_student_data = {}
     test_metadata = {}
+    all_names_in_excel = set()  # Track all names found in Excel
     
     try:
         if not os.path.exists(EXCEL_FILE_PATH):
             st.error(f"Excel file not found: {EXCEL_FILE_PATH}")
-            return None, None
+            return None, None, set()
         
         xl = pd.ExcelFile(EXCEL_FILE_PATH)
         
@@ -147,6 +133,7 @@ def load_excel_data():
         test_sheets = []
         for s in xl.sheet_names:
             s_upper = s.upper()
+            # Skip non-test sheets
             if "SUMMARY" not in s_upper and "ANALYSIS" not in s_upper and "SHEET20" not in s_upper and "SHEET1" not in s_upper:
                 test_sheets.append(s)
         
@@ -167,8 +154,15 @@ def load_excel_data():
             }
 
             try:
-                # Read with skiprows=7 (adjust if needed)
-                df = pd.read_excel(xl, sheet_name=sheet, skiprows=7)
+                # Try different skiprows values to find the correct header
+                for skip in [7, 6, 8, 5]:
+                    try:
+                        df = pd.read_excel(xl, sheet_name=sheet, skiprows=skip)
+                        # Check if we have expected columns
+                        if len(df.columns) >= 10 and 'TOTAL RANK' in str(df.columns[0]):
+                            break
+                    except:
+                        continue
                 
                 if len(df.columns) >= 10:
                     overall_rank_col = df.columns[0]
@@ -190,6 +184,9 @@ def load_excel_data():
                         if not student_name:
                             continue
                         
+                        # Add to set of names found in Excel
+                        all_names_in_excel.add(student_name)
+                        
                         roll_no = pd.to_numeric(row[roll_col], errors='coerce')
                         total = pd.to_numeric(row[total_col], errors='coerce')
                         overall_rank = pd.to_numeric(row[overall_rank_col], errors='coerce')
@@ -199,8 +196,15 @@ def load_excel_data():
                         
                         if student_name not in all_student_data:
                             all_student_data[student_name] = {
-                                "name": student_name, "roll_numbers": set(), "tests": {}
+                                "name": student_name, 
+                                "original_names": set(),
+                                "roll_numbers": set(), 
+                                "tests": {}
                             }
+                        
+                        # Store original name for reference
+                        original_name = str(row[name_col]).strip()
+                        all_student_data[student_name]["original_names"].add(original_name)
                         
                         if pd.notna(roll_no):
                             all_student_data[student_name]["roll_numbers"].add(int(roll_no))
@@ -227,11 +231,28 @@ def load_excel_data():
             except Exception as e:
                 continue
         
-        return all_student_data, test_metadata
+        return all_student_data, test_metadata, all_names_in_excel
         
     except Exception as e:
         st.error(f"Error loading file: {str(e)}")
-        return None, None
+        return None, None, set()
+
+def find_student_by_name(search_name, all_student_data):
+    """Find student in data by normalized name"""
+    search_normalized = normalize_name(search_name)
+    if not search_normalized:
+        return None
+    
+    # Direct match
+    if search_normalized in all_student_data:
+        return all_student_data[search_normalized]
+    
+    # Try partial match
+    for norm_name, student_data in all_student_data.items():
+        if search_normalized in norm_name or norm_name in search_normalized:
+            return student_data
+    
+    return None
 
 # ========================
 # SESSION STATE
@@ -239,7 +260,7 @@ def load_excel_data():
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.student_name = ""
-    st.session_state.student_data = None
+    st.session_state.student_key = ""
 
 # ========================
 # LOGIN PAGE
@@ -247,7 +268,7 @@ if 'logged_in' not in st.session_state:
 if not st.session_state.logged_in:
     st.markdown("""
         <div class="main-header">
-            <h1>🔐Bakliwal Tutorial Solapur Student Portal</h1>
+            <h1>🔐 Student Portal</h1>
             <p>Login to view your performance dashboard</p>
         </div>
     """, unsafe_allow_html=True)
@@ -280,6 +301,7 @@ if not st.session_state.logged_in:
                     if student_row['mother_name'].lower() == mother_name.lower():
                         st.session_state.logged_in = True
                         st.session_state.student_name = selected_name
+                        st.session_state.student_normalized = student_row['normalized_name']
                         st.rerun()
                     else:
                         st.error("❌ Invalid mother's name")
@@ -297,24 +319,49 @@ if not st.session_state.logged_in:
 # ========================
 else:
     with st.spinner("🔄 Loading your data..."):
-        all_student_data, test_metadata = load_excel_data()
+        all_student_data, test_metadata, all_names_in_excel = load_excel_data()
     
     if all_student_data is None or len(all_student_data) == 0:
         st.error("❌ No student data found. Please check the Excel file.")
+        st.info("Make sure the Excel file 'StudentMarks.xlsx' is uploaded to the repository.")
         if st.button("← Back to Login"):
             st.session_state.logged_in = False
             st.rerun()
         st.stop()
     
-    student = all_student_data.get(st.session_state.student_name.upper())
+    # Find the student in the Excel data
+    student = find_student_by_name(st.session_state.student_name, all_student_data)
     
     if not student:
         st.error(f"❌ No test records found for {st.session_state.student_name}")
-        st.info("Possible reasons: The name might be spelled differently in the Excel file.")
+        
+        # Show available names in Excel to help debug
+        with st.expander("🔍 Debug: See available names in Excel"):
+            st.write("Here are some names found in your Excel file:")
+            names_list = sorted(list(all_names_in_excel))[:50]
+            for name in names_list[:20]:
+                st.write(f"- {name}")
+            if len(names_list) > 20:
+                st.write(f"... and {len(names_list) - 20} more")
+        
+        st.info("""
+        **Possible reasons:**
+        - The name might be spelled differently in the Excel file
+        - The name might have extra spaces or different case
+        - The student might not have taken any tests yet
+        
+        Please contact your teacher to check the name in the Excel file.
+        """)
+        
         if st.button("← Back to Login"):
             st.session_state.logged_in = False
             st.rerun()
         st.stop()
+    
+    # Show original name if different
+    original_names = list(student["original_names"])
+    if original_names and original_names[0] != st.session_state.student_name.upper():
+        st.info(f"📝 Your name in records: **{original_names[0]}**")
     
     # Process student data
     btest_results = []
